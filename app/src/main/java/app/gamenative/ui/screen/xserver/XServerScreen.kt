@@ -469,6 +469,7 @@ fun XServerScreen(
     var playingBlockedRemoteName by rememberSaveable { mutableStateOf<String?>(null) }
     var showTouchGestureDialog by remember { mutableStateOf(false) }
     var isTouchscreenModeActive by remember { mutableStateOf(container.isTouchscreenMode) }
+    var isNativeTouchActive by remember { mutableStateOf(container.isNativeTouchMode) }
     var currentGestureConfig by remember {
         mutableStateOf(app.gamenative.data.TouchGestureConfig.fromJson(container.getGestureConfig()))
     }
@@ -1055,6 +1056,23 @@ fun XServerScreen(
                     }
                 }
                 areControlsVisible = !areControlsVisible
+                true
+            }
+
+            QuickMenuAction.NATIVE_TOUCH -> {
+                val newMode = !container.isNativeTouchMode
+                container.setNativeTouchMode(newMode)
+                container.saveData()
+                isNativeTouchActive = newMode
+
+                PluviaApp.touchpadView?.setNativeTouchMode(newMode)
+                val immediate = xServerView?.getxServer()?.setNativeTouchMode(newMode) ?: false
+                if (newMode && !immediate) {
+                    // glibc container started without native touch: the XInput2
+                    // extension was never advertised, so wine can only pick
+                    // this up on the next launch.
+                    SnackbarManager.show(context.getString(R.string.native_touch_restart_required))
+                }
                 true
             }
 
@@ -1707,7 +1725,7 @@ fun XServerScreen(
                 PluviaApp.xEnvironment
                     ?.getComponent<XServerComponent>(XServerComponent::class.java)
                     ?.xServer
-            val xServerToUse = existingXServer ?: XServer(ScreenInfo(xServerState.value.screenSize), usrGlibc)
+            val xServerToUse = existingXServer ?: XServer(ScreenInfo(xServerState.value.screenSize), usrGlibc, container.isNativeTouchMode)
             // VirGL containers always need GL (shared EGL context for the
             // VirGL passthrough). Default to the legacy GL renderer for all
             // other containers as well. Uncheck the per-container useLegacyRenderer
@@ -1962,6 +1980,9 @@ fun XServerScreen(
                             }
                             handler.setPreferredInputApi(PreferredInputApi.values()[container.inputType])
                             handler.setDInputMapperType(container.dinputMapperType)
+                            if (container.isNativeTouchMode()) {
+                                PluviaApp.touchpadView?.setNativeTouchMode(true)
+                            }
                             if (container.isDisableMouseInput()) {
                                 PluviaApp.touchpadView?.setTouchscreenMouseDisabled(true)
                             } else if (container.isTouchscreenMode()) {
@@ -2541,6 +2562,7 @@ fun XServerScreen(
             activeToggleIds = buildSet {
                 if (areControlsVisible) add(QuickMenuAction.INPUT_CONTROLS)
                 if (isTouchscreenModeActive) add(QuickMenuAction.TOUCHSCREEN_MODE)
+                if (isNativeTouchActive) add(QuickMenuAction.NATIVE_TOUCH)
                 if (isDisableMouseInput) add(QuickMenuAction.DISABLE_MOUSE)
             },
             // LSFG hot-reload (tab only visible when enabled in container settings)

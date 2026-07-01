@@ -133,6 +133,9 @@ public class Container {
     private boolean disableMouseInput = false;
     // Touchscreen mode (defaults on for XR builds)
     private boolean touchscreenMode = app.gamenative.BuildConfig.XR_BUILD;
+    // Native multitouch mode: forward raw multi-point touch to the game
+    // (WM_POINTER/WM_TOUCH) instead of emulating a mouse
+    private boolean nativeTouchMode = false;
     // Shooter mode
     private boolean shooterMode = true;
     // Serialised JSON gesture configuration (used when touchscreenMode is true)
@@ -720,6 +723,8 @@ public class Container {
             data.put("disableMouseInput", disableMouseInput);
             // Touchscreen mode flag
             data.put("touchscreenMode", touchscreenMode);
+            // Native multitouch flag
+            data.put("nativeTouchMode", nativeTouchMode);
             // Shooter mode flag
             data.put("shooterMode", shooterMode);
             // Gesture configuration JSON
@@ -928,6 +933,9 @@ public class Container {
                     break;
                 case "touchscreenMode" :
                     setTouchscreenMode(data.getBoolean(key));
+                    break;
+                case "nativeTouchMode" :
+                    setNativeTouchMode(data.getBoolean(key));
                     break;
                 case "shooterMode" :
                     setShooterMode(data.getBoolean(key));
@@ -1156,6 +1164,15 @@ public class Container {
 
     public void setTouchscreenMode(boolean touchscreenMode) {
         this.touchscreenMode = touchscreenMode;
+    }
+
+    // Native multitouch mode
+    public boolean isNativeTouchMode() {
+        return nativeTouchMode;
+    }
+
+    public void setNativeTouchMode(boolean nativeTouchMode) {
+        this.nativeTouchMode = nativeTouchMode;
     }
 
     // Shooter mode

@@ -46,8 +46,13 @@ public class XServer {
     private boolean relativeMouseMovement = false;
     private boolean simulateTouchScreen = false;
     private boolean runningFromGlibc = false;
+    private volatile boolean nativeTouchMode = false;
 
     public XServer(ScreenInfo screenInfo, boolean useGlibcContainer) {
+        this(screenInfo, useGlibcContainer, false);
+    }
+
+    public XServer(ScreenInfo screenInfo, boolean useGlibcContainer, boolean nativeTouchMode) {
         Log.d("XServer", "Creating xServer " + screenInfo);
         this.screenInfo = screenInfo;
         for (Lockable lockable : Lockable.values()) locks.put(lockable, new ReentrantLock());
@@ -60,6 +65,7 @@ public class XServer {
         inputDeviceManager = new InputDeviceManager(this);
         grabManager = new GrabManager(this);
         runningFromGlibc = useGlibcContainer;
+        this.nativeTouchMode = nativeTouchMode;
 
         DesktopHelper.attachTo(this);
         setupExtensions();
@@ -77,6 +83,49 @@ public class XServer {
 
     public void setSimulateTouchScreen(boolean simulateTouchScreen) {
         this.simulateTouchScreen = simulateTouchScreen;
+    }
+
+    public boolean isNativeTouchMode() { return nativeTouchMode; }
+
+    /**
+     * Toggle native touch mode at runtime. Returns true if the change is
+     * effective immediately (XInput2 extension registered); false if it will
+     * only take effect on the next container launch (glibc container started
+     * without native touch, so XInput2 was never advertised to clients).
+     */
+    public boolean setNativeTouchMode(boolean enabled) {
+        this.nativeTouchMode = enabled;
+        XInput2Extension xi = getExtension(XInput2Extension.MAJOR_OPCODE);
+        if (xi == null) return false;
+        // Valuator mode (Relative vs Absolute) changed: tell clients so wine
+        // re-reads the classes (update_relative_valuators).
+        xi.emitDeviceChanged(2);
+        return true;
+    }
+
+    /**
+     * Inject a touch-sequence begin. Coordinates are absolute X screen
+     * coordinates; touchId identifies the sequence until the matching
+     * injectTouchEnd. Emitted as XI2 RawTouchBegin, which wine's winex11.drv
+     * translates into WM_POINTERDOWN (and WM_TOUCH for RegisterTouchWindow
+     * clients).
+     */
+    public void injectTouchBegin(int touchId, float x, float y) {
+        XInput2Extension xi = getExtension(XInput2Extension.MAJOR_OPCODE);
+        if (xi != null)
+            xi.emitRawTouch(2, XInput2Extension.XI_RawTouchBegin, touchId, x, y);
+    }
+
+    public void injectTouchUpdate(int touchId, float x, float y) {
+        XInput2Extension xi = getExtension(XInput2Extension.MAJOR_OPCODE);
+        if (xi != null)
+            xi.emitRawTouch(2, XInput2Extension.XI_RawTouchUpdate, touchId, x, y);
+    }
+
+    public void injectTouchEnd(int touchId, float x, float y) {
+        XInput2Extension xi = getExtension(XInput2Extension.MAJOR_OPCODE);
+        if (xi != null)
+            xi.emitRawTouch(2, XInput2Extension.XI_RawTouchEnd, touchId, x, y);
     }
 
     public XServerRenderer getRenderer() {
@@ -160,6 +209,14 @@ public class XServer {
     public void injectPointerMove(int x, int y) {
         try (XLock lock = lock(Lockable.WINDOW_MANAGER, Lockable.INPUT_DEVICE)) {
             pointer.setPosition(x, y);
+
+            // In native touch mode the X/Y valuators are advertised as
+            // Absolute, so raw motion must carry absolute positions.
+            if (nativeTouchMode) {
+                XInput2Extension xi = getExtension(XInput2Extension.MAJOR_OPCODE);
+                if (xi != null)
+                    xi.emitRawMotion(2, pointer.getClampedX(), pointer.getClampedY());
+            }
         }
     }
 
@@ -214,8 +271,12 @@ public class XServer {
             }
 
             XInput2Extension xi = getExtension(XInput2Extension.MAJOR_OPCODE);
-            if (xi != null)
-                xi.emitRawMotion(2, dx, dy);
+            if (xi != null) {
+                // In native touch mode the valuators are Absolute, so wine
+                // interprets raw motion values as positions, not deltas.
+                if (nativeTouchMode) xi.emitRawMotion(2, clampedX, clampedY);
+                else xi.emitRawMotion(2, dx, dy);
+            }
         }
     }
 
@@ -276,8 +337,11 @@ public class XServer {
         registerExtension(new DRI3Extension(),      nextEventId, nextErrorId);
         registerExtension(new PresentExtension(),   nextEventId, nextErrorId);
         registerExtension(new SyncExtension(),      nextEventId, nextErrorId);
-        if (!runningFromGlibc)
-            registerExtension(new XInput2Extension(),   nextEventId, nextErrorId);
+        // XInput2 was disabled for glibc containers; keep that default but
+        // register it when native touch mode is enabled for this container,
+        // since raw touch events are delivered through XInput2.
+        if (!runningFromGlibc || nativeTouchMode)
+            registerExtension(new XInput2Extension(this),   nextEventId, nextErrorId);
     }
 
     public <T extends Extension> T getExtension(int opcode) {

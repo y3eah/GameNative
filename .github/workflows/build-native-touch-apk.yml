@@ -1,0 +1,47 @@
+name: Build APK (native-touch)
+
+# Builds an installable debug APK of this branch on GitHub's servers.
+# Runs automatically when this branch is pushed, or manually from the
+# Actions tab (workflow_dispatch). Download the APK from the run's
+# Artifacts section afterwards.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "feature/native-multitouch" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checking out GameNative
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Inject dummy credentials
+        run: |
+          cat <<EOF > local.properties
+          POSTHOG_API_KEY=dummy
+          POSTHOG_HOST=https://us.i.posthog.com
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # modern = Android 10+, arm64 (right variant for current phones/tablets).
+      # Debug build: signed with the debug key automatically, installable as-is.
+      - name: Build modern debug APK
+        run: ./gradlew :app:assembleModernDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamenative-native-touch-modernDebug
+          path: app/build/outputs/apk/modern/debug/*.apk
+          if-no-files-found: error

@@ -772,6 +772,8 @@
     <string name="directinput_mapper_type">DirectInput Mapper Type</string>
     <string name="disable_mouse_input">Disable Mouse Input</string>
     <string name="touchscreen_mode">Touchscreen Mode</string>
+    <string name="native_touch_mode">Native Touch (Multitouch)</string>
+    <string name="native_touch_restart_required">Native touch will be fully enabled on the next game launch</string>
     <string name="shooter_mode_toggle">Shooter Mode</string>
     <string name="shooter_mode_toggle_description">Auto-replace stick elements with dynamic joysticks</string>
     <string name="shooter_mode_on">Enable Mouse</string>

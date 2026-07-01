@@ -14,9 +14,11 @@ import com.winlator.xserver.errors.BadImplementation;
 import com.winlator.xserver.errors.BadValue;
 import com.winlator.xserver.errors.BadWindow;
 import com.winlator.xserver.errors.XRequestError;
+import com.winlator.xserver.events.XIDeviceChangedNotify;
 import com.winlator.xserver.events.XIRawButtonPressNotify;
 import com.winlator.xserver.events.XIRawButtonReleaseNotify;
 import com.winlator.xserver.events.XIRawMotionNotify;
+import com.winlator.xserver.events.XIRawTouchNotify;
 
 import java.io.IOException;
 import java.util.List;
@@ -40,14 +42,32 @@ public class XInput2Extension implements Extension {
     private static final int XI_RawButtonPress_MASK = 1 << 15;
     private static final int XI_RawButtonRelease_MASK = 1 << 16;
     private static final int XI_RawMotion_MASK  = 1 << 17;
+    // XI 2.2 raw touch events (XI2.h): evtypes 22/23/24, mask bit = 1 << evtype
+    public static final short XI_RawTouchBegin  = 22;
+    public static final short XI_RawTouchUpdate = 23;
+    public static final short XI_RawTouchEnd    = 24;
+    private static final int XI_RawTouchBegin_MASK  = 1 << XI_RawTouchBegin;
+    private static final int XI_RawTouchUpdate_MASK = 1 << XI_RawTouchUpdate;
+    private static final int XI_RawTouchEnd_MASK    = 1 << XI_RawTouchEnd;
+    // xXIValuatorInfo is 44 bytes on the wire
+    public static final int VALUATOR_CLASS_BYTES = 44;
     // advertise enough buttons to cover a normal mouse + wheel buttons
     private static final int RawMotion_XY_MASK = (1 << 0) | (1 << 1);
     private static final int POINTER_BUTTON_COUNT = 7;
 
     private final List<Selection> selections = new CopyOnWriteArrayList<>();
+    private final XServer xServer;
+
+    public XInput2Extension(XServer xServer) {
+        this.xServer = xServer;
+    }
 
     private static abstract class ClientOpcodes {
         private static final byte GET_EXTENSION_VERSION = 1;  // X_GetExtensionVersion (XI 1.x)
+        private static final byte LIST_INPUT_DEVICES    = 2;  // X_ListInputDevices (XI 1.x)
+        private static final byte OPEN_DEVICE           = 3;  // X_OpenDevice (XI 1.x)
+        private static final byte CLOSE_DEVICE          = 4;  // X_CloseDevice (XI 1.x)
+        private static final byte GET_DEVICE_BUTTON_MAPPING = 28; // X_GetDeviceButtonMapping (XI 1.x)
         private static final byte GET_CLIENT_POINTER    = 45; // X_XIGetClientPointer (XI 2.x)
         private static final byte SELECT_EVENTS         = 46; // X_XISelectEvents (XI 2.x)
         private static final byte QUERY_VERSION         = 47; // X_XIQueryVersion (XI 2.x)
@@ -209,10 +229,14 @@ public class XInput2Extension implements Extension {
         }
     }
 
-    private void writeButtonClass(XOutputStream outputStream, int sourceId, int numButtons) throws IOException {
+    public static int buttonClassBytes(int numButtons) {
         int stateBytes = Math.max(4, ((numButtons + 31) / 32) * 4);
-        int labelsBytes = numButtons * 4;
-        int totalBytes = 8 + stateBytes + labelsBytes;
+        return 8 + stateBytes + (numButtons * 4);
+    }
+
+    public static void writeButtonClass(XOutputStream outputStream, int sourceId, int numButtons) throws IOException {
+        int stateBytes = Math.max(4, ((numButtons + 31) / 32) * 4);
+        int totalBytes = buttonClassBytes(numButtons);
         int length = totalBytes / 4;
 
         // typedef struct
@@ -241,7 +265,8 @@ public class XInput2Extension implements Extension {
         }
     }
 
-    private void writeValuatorClass(XOutputStream outputStream, int axisNumber) throws IOException {
+    public static void writeValuatorClass(XOutputStream outputStream, int sourceId,
+                                           int axisNumber, boolean absolute, int max) throws IOException {
         // typedef struct
         //    uint16_t    type;           /**< Always ValuatorClass       */
         //    uint16_t    length;         /**< Length in 4 byte units */
@@ -258,15 +283,17 @@ public class XInput2Extension implements Extension {
         // xXIValuatorInfo;
         // length = 44 bytes / 4 = 11 units
         outputStream.writeShort((short) XI_VALUATOR_CLASS); // type: 2 = XIValuatorClass
-        outputStream.writeShort((short) 11);                // length
-        outputStream.writeShort((short) MASTER_POINTER_ID); // sourceid
+        outputStream.writeShort((short) (VALUATOR_CLASS_BYTES / 4)); // length
+        outputStream.writeShort((short) sourceId);          // sourceid
         outputStream.writeShort((short) axisNumber);        // number (Axis 0 for X, 1 for Y)
 
         outputStream.writeInt(0); // label
 
-        // min/max: valid range for Absolute axes; conventionally 0 for Relative axes
-        outputStream.writeFP3232(0);  // min
-        outputStream.writeFP3232(0);  // max
+        // min/max: valid range for Absolute axes; conventionally 0 for Relative axes.
+        // wine's map_raw_event_coords scales absolute raw values by
+        // (value - min) / (max - min), so absolute mode needs a real range.
+        outputStream.writeFP3232(0);                        // min
+        outputStream.writeFP3232(absolute ? max : 0);       // max
 
         // value: current axis position; 0 at initialisation
         outputStream.writeFP3232(0);
@@ -275,7 +302,7 @@ public class XInput2Extension implements Extension {
         outputStream.writeInt(0);
 
         // mode: 0 = Relative (delta per event), 1 = Absolute (position in min/max range)
-        outputStream.writeByte((byte) 0);
+        outputStream.writeByte((byte) (absolute ? 1 : 0));
         outputStream.writePad(3);  // pad1 (1 byte) + pad2 (2 bytes)
     }
 
@@ -289,18 +316,22 @@ public class XInput2Extension implements Extension {
         final int namePad = (nameLen + 3) & ~3; // Padded to 4-byte boundary (20)
 
         final int numButtons = POINTER_BUTTON_COUNT;
-        final int buttonStateBytes = Math.max(4, ((numButtons + 31) / 32) * 4);
-        final int buttonClassBytes = 8 + buttonStateBytes + (numButtons * 4);
 
         final int numValuators = 2;
         final int numClasses = 1 + numValuators; // Button + 2 valuators
+
+        // Native touch mode requires the X/Y valuators to be advertised as
+        // Absolute with a real min/max range: wine's winex11.drv reads these
+        // classes at thread init (update_relative_valuators) and only maps
+        // raw touch coordinates for absolute-mode axes.
+        final boolean absolute = xServer.isNativeTouchMode();
 
         // Payload Size
         int deviceInfoSize =
                 12 + // xXIDeviceInfo size
                 namePad +
-                buttonClassBytes +
-                (44 * numValuators);
+                buttonClassBytes(numButtons) +
+                (VALUATOR_CLASS_BYTES * numValuators);
 
         int length = deviceInfoSize / 4; // payload length in 4-byte units (30)
 
@@ -350,8 +381,71 @@ public class XInput2Extension implements Extension {
 
             // Classes
             writeButtonClass(outputStream, masterPointerId, numButtons);
-            writeValuatorClass(outputStream, 0);
-            writeValuatorClass(outputStream, 1);
+            writeValuatorClass(outputStream, masterPointerId, 0, absolute, xServer.screenInfo.width - 1);
+            writeValuatorClass(outputStream, masterPointerId, 1, absolute, xServer.screenInfo.height - 1);
+        }
+    }
+
+    /*
+     * Minimal XI 1.x handlers. wine's winex11.drv (update_device_mapping) calls
+     * XOpenDevice + XGetDeviceButtonMapping + XCloseDevice with the sourceid of
+     * incoming raw button / DeviceChanged events. Stock libXi (glibc rootfs)
+     * also probes these during init. Answering them with well-formed minimal
+     * replies instead of BadImplementation keeps those code paths clean.
+     * Reply layouts are from XIproto.h.
+     */
+
+    private static void listInputDevices(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        inputStream.skip(client.getRemainingRequestLength());
+
+        try (XStreamLock lock = outputStream.lock()) {
+            // xListInputDevicesReply: ndevices CARD8 + 23 pad bytes, no trailing data
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(0);       // length
+            outputStream.writeByte((byte) 0); // ndevices = 0
+            outputStream.writePad(23);
+        }
+    }
+
+    private static void openDevice(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        inputStream.skip(client.getRemainingRequestLength());
+
+        try (XStreamLock lock = outputStream.lock()) {
+            // xOpenDeviceReply: num_classes CARD8 + pad, followed by
+            // num_classes * xInputClassInfo. Report 0 classes.
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(0);       // length
+            outputStream.writeByte((byte) 0); // num_classes = 0
+            outputStream.writePad(23);
+        }
+    }
+
+    private static void closeDevice(XClient client, XInputStream inputStream) throws IOException {
+        // xCloseDeviceReq has no reply
+        inputStream.skip(client.getRemainingRequestLength());
+    }
+
+    private static void getDeviceButtonMapping(XClient client, XInputStream inputStream, XOutputStream outputStream) throws IOException {
+        inputStream.skip(client.getRemainingRequestLength());
+
+        // Identity button map, padded to 4 bytes
+        int nElts = POINTER_BUTTON_COUNT;
+        int mapPad = (nElts + 3) & ~3;
+
+        try (XStreamLock lock = outputStream.lock()) {
+            // xGetDeviceButtonMappingReply: nElts CARD8 + pad, then map bytes
+            outputStream.writeByte(RESPONSE_CODE_SUCCESS);
+            outputStream.writeByte((byte) 0);
+            outputStream.writeShort(client.getSequenceNumber());
+            outputStream.writeInt(mapPad / 4); // length in 4-byte units
+            outputStream.writeByte((byte) nElts);
+            outputStream.writePad(23);
+            for (int i = 1; i <= nElts; i++) outputStream.writeByte((byte) i);
+            outputStream.writePad(mapPad - nElts);
         }
     }
 
@@ -412,6 +506,18 @@ public class XInput2Extension implements Extension {
             case ClientOpcodes.GET_EXTENSION_VERSION:
                 getExtensionVersion(client, inputStream, outputStream);
                 break;
+            case ClientOpcodes.LIST_INPUT_DEVICES:
+                listInputDevices(client, inputStream, outputStream);
+                break;
+            case ClientOpcodes.OPEN_DEVICE:
+                openDevice(client, inputStream, outputStream);
+                break;
+            case ClientOpcodes.CLOSE_DEVICE:
+                closeDevice(client, inputStream);
+                break;
+            case ClientOpcodes.GET_DEVICE_BUTTON_MAPPING:
+                getDeviceButtonMapping(client, inputStream, outputStream);
+                break;
             case ClientOpcodes.GET_CLIENT_POINTER:
                 getClientPointer(client, inputStream, outputStream);
                 break;
@@ -460,6 +566,55 @@ public class XInput2Extension implements Extension {
             try {
                 sendXIRawButtonToClient(sel.client, deviceId, buttonNumber, pressed);
             } catch (IOException ignored) {
+            }
+        }
+    }
+
+    /**
+     * Emit an XI2 raw touch event (RawTouchBegin/Update/End) to every client
+     * that selected it. Coordinates are absolute X screen coordinates; they are
+     * mapped by wine onto the Windows virtual desktop using the Absolute
+     * valuator range advertised in XIQueryDevice / XI_DeviceChanged.
+     */
+    public void emitRawTouch(int deviceId, short evtype, int touchId, double x, double y) {
+        final int maskBit;
+        switch (evtype) {
+            case XI_RawTouchBegin:  maskBit = XI_RawTouchBegin_MASK;  break;
+            case XI_RawTouchUpdate: maskBit = XI_RawTouchUpdate_MASK; break;
+            case XI_RawTouchEnd:    maskBit = XI_RawTouchEnd_MASK;    break;
+            default: return;
+        }
+
+        for (Selection sel : selections) {
+            if (!matchesSelection(sel, deviceId)) continue;
+            if (!sel.mask.isSet(maskBit)) continue;
+
+            try {
+                sel.client.sendEvent(new XIRawTouchNotify(deviceId, MAJOR_OPCODE, evtype,
+                        touchId, new double[] {x, y}, RawMotion_XY_MASK));
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /**
+     * Emit XI_DeviceChanged with the master pointer's current classes so that
+     * clients (wine) re-read the valuator modes, e.g. after native touch mode
+     * is toggled at runtime.
+     */
+    public void emitDeviceChanged(int deviceId) {
+        final int XI_DeviceChanged_MASK = 1 << 1;
+        boolean absolute = xServer.isNativeTouchMode();
+
+        for (Selection sel : selections) {
+            if (!matchesSelection(sel, deviceId)) continue;
+            if (!sel.mask.isSet(XI_DeviceChanged_MASK)) continue;
+
+            try {
+                sel.client.sendEvent(new XIDeviceChangedNotify(deviceId, MAJOR_OPCODE,
+                        POINTER_BUTTON_COUNT, absolute,
+                        xServer.screenInfo.width - 1, xServer.screenInfo.height - 1));
+            } catch (Exception ignored) {
             }
         }
     }

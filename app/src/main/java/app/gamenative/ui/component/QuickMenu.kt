@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Swipe
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -109,6 +110,7 @@ object QuickMenuAction {
     const val PERFORMANCE_HUD = 6
     const val TOUCHSCREEN_MODE = 7
     const val DISABLE_MOUSE = 8
+    const val NATIVE_TOUCH = 9
 }
 
 private object QuickMenuTab {
@@ -323,6 +325,14 @@ fun QuickMenu(
                 id = QuickMenuAction.TOUCHSCREEN_MODE,
                 icon = Icons.Default.Fingerprint,
                 labelResId = R.string.touchscreen_mode,
+                accentColor = PluviaTheme.colors.accentPurple,
+            )
+        )
+        add(
+            QuickMenuItem(
+                id = QuickMenuAction.NATIVE_TOUCH,
+                icon = Icons.Default.Swipe,
+                labelResId = R.string.native_touch_mode,
                 accentColor = PluviaTheme.colors.accentPurple,
             )
         )

@@ -57,6 +57,12 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
     private static final int UPDATE_FORM_DELAYED_TIME = 50;
     private boolean touchscreenMouseDisabled = false;
     private boolean isTouchscreenMode = false;
+    // Native multitouch mode: forwards every finger as an XInput2 raw touch
+    // sequence (-> wine WM_POINTER/WM_TOUCH) instead of emulating a mouse.
+    private boolean nativeTouchMode = false;
+    private final android.util.SparseIntArray nativeTouchIds = new android.util.SparseIntArray();
+    private final android.util.SparseArray<float[]> nativeTouchLastPos = new android.util.SparseArray<>();
+    private int nextNativeTouchId = 1;
     private Runnable delayedPress;
     private String delayedPressAction;
     private Runnable pendingHoldClickRelease;
@@ -331,12 +337,15 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
     public boolean onTouchEvent(MotionEvent event) {
         boolean isStylus = isEventTriggeredByStylus(event);
         if (touchscreenMouseDisabled
+                && !nativeTouchMode
                 && !isStylus
                 && !event.isFromSource(InputDevice.SOURCE_MOUSE)) {
             return true; // consume without generating mouse events
         }
         if (isStylus) {
             return handleStylusEvent(event);
+        } else if (nativeTouchMode && !event.isFromSource(InputDevice.SOURCE_MOUSE)) {
+            return handleNativeTouchEvent(event);
         } else if (isTouchscreenMode) {
             return handleTouchscreenEvent(event);
         } else {
@@ -516,6 +525,96 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
         }
 
         return true;
+    }
+
+    /**
+     * Native multitouch: forward every Android pointer as its own XInput2 raw
+     * touch sequence. Android pointer IDs are mapped to monotonically
+     * increasing X touch IDs for the lifetime of each touch (down -> moves ->
+     * up/cancel), matching XI2 touch-sequence semantics. Coordinates go
+     * through the same view -> X screen transform as the mouse paths.
+     */
+    private boolean handleNativeTouchEvent(MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                int index = event.getActionIndex();
+                beginNativeTouch(event.getPointerId(index), event.getX(index), event.getY(index));
+                break;
+            }
+            case MotionEvent.ACTION_MOVE:
+                for (int i = 0; i < event.getPointerCount(); i++) {
+                    updateNativeTouch(event.getPointerId(i), event.getX(i), event.getY(i));
+                }
+                break;
+            case MotionEvent.ACTION_POINTER_UP:
+            case MotionEvent.ACTION_UP: {
+                int index = event.getActionIndex();
+                endNativeTouch(event.getPointerId(index), event.getX(index), event.getY(index));
+                break;
+            }
+            case MotionEvent.ACTION_CANCEL:
+                cancelAllNativeTouches();
+                break;
+        }
+        return true;
+    }
+
+    private void beginNativeTouch(int pointerId, float viewX, float viewY) {
+        // Defensive: if we somehow missed the previous UP for this pointer id,
+        // close the stale sequence first so wine's touch tracking stays sane.
+        if (nativeTouchIds.indexOfKey(pointerId) >= 0) {
+            float[] last = nativeTouchLastPos.get(pointerId);
+            if (last != null) xServer.injectTouchEnd(nativeTouchIds.get(pointerId), last[0], last[1]);
+        }
+
+        int touchId = nextNativeTouchId++;
+        if (nextNativeTouchId <= 0) nextNativeTouchId = 1; // wrap, keep nonzero
+
+        float[] point = XForm.transformPoint(xform, viewX, viewY);
+        nativeTouchIds.put(pointerId, touchId);
+        nativeTouchLastPos.put(pointerId, new float[] {point[0], point[1]});
+        xServer.injectTouchBegin(touchId, point[0], point[1]);
+    }
+
+    private void updateNativeTouch(int pointerId, float viewX, float viewY) {
+        int keyIndex = nativeTouchIds.indexOfKey(pointerId);
+        if (keyIndex < 0) return;
+
+        float[] point = XForm.transformPoint(xform, viewX, viewY);
+        float[] last = nativeTouchLastPos.get(pointerId);
+        // Skip no-movement updates to avoid flooding the X connection.
+        if (last != null && last[0] == point[0] && last[1] == point[1]) return;
+        if (last != null) {
+            last[0] = point[0];
+            last[1] = point[1];
+        }
+        xServer.injectTouchUpdate(nativeTouchIds.valueAt(keyIndex), point[0], point[1]);
+    }
+
+    private void endNativeTouch(int pointerId, float viewX, float viewY) {
+        int keyIndex = nativeTouchIds.indexOfKey(pointerId);
+        if (keyIndex < 0) return;
+
+        int touchId = nativeTouchIds.valueAt(keyIndex);
+        nativeTouchIds.removeAt(keyIndex);
+        nativeTouchLastPos.remove(pointerId);
+
+        float[] point = XForm.transformPoint(xform, viewX, viewY);
+        xServer.injectTouchEnd(touchId, point[0], point[1]);
+    }
+
+    private void cancelAllNativeTouches() {
+        // XI2 raw events have no cancel; end every active sequence at its
+        // last known position.
+        for (int i = 0; i < nativeTouchIds.size(); i++) {
+            int pointerId = nativeTouchIds.keyAt(i);
+            int touchId = nativeTouchIds.valueAt(i);
+            float[] last = nativeTouchLastPos.get(pointerId);
+            if (last != null) xServer.injectTouchEnd(touchId, last[0], last[1]);
+        }
+        nativeTouchIds.clear();
+        nativeTouchLastPos.clear();
     }
 
     private boolean handleTouchscreenEvent(MotionEvent event) {
@@ -2114,6 +2213,15 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
 
     public boolean isSimTouchScreen() {
         return simTouchScreen;
+    }
+
+    public void setNativeTouchMode(boolean nativeTouchMode) {
+        if (this.nativeTouchMode && !nativeTouchMode) cancelAllNativeTouches();
+        this.nativeTouchMode = nativeTouchMode;
+    }
+
+    public boolean isNativeTouchMode() {
+        return nativeTouchMode;
     }
 
     public void setTouchscreenMode(boolean isTouchscreenMode) {
