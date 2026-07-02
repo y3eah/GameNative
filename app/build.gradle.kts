@@ -53,6 +53,20 @@ android {
                 keyPassword = keystoreProperties["keyPassword"].toString()
             }
         }
+        // Branch-local: stable throwaway key so consecutive CI builds of this
+        // feature branch install over each other instead of requiring an
+        // uninstall (GitHub runners otherwise generate a fresh debug key per
+        // run). Not a secret; never use for real releases. Drop this commit
+        // before upstreaming.
+        getByName("debug") {
+            val ciKeystore = rootProject.file("ci-debug.keystore")
+            if (ciKeystore.exists()) {
+                storeFile = ciKeystore
+                storePassword = "android"
+                keyAlias = "ciDebug"
+                keyPassword = "android"
+            }
+        }
     }
 
     defaultConfig {
