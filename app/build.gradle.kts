@@ -181,6 +181,11 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             signingConfig = signingConfigs.getByName("debug")
+            // Branch-local: distinct package so this test build installs
+            // alongside the official GameNative instead of colliding with it.
+            // Drop before upstreaming.
+            applicationIdSuffix = ".touchtest"
+            versionNameSuffix = "-touchtest"
         }
         release {
             isMinifyEnabled = true

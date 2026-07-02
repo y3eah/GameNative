@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Branch-local override so the side-by-side test build is
+     distinguishable in the launcher. Drop before upstreaming. -->
+<resources>
+    <string name="app_name">GameNative Touch</string>
+</resources>
