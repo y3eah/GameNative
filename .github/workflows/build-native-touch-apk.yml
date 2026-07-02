@@ -34,14 +34,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # modern = Android 10+, arm64 (right variant for current phones/tablets).
+      # legacy = the full-featured variant (custom games, all library tabs)
+      # matching the GitHub release APKs. The "modern" flavor is the
+      # Play-Store-compliant build with MODERN_ANDROID=true, which compiles
+      # out Add Game / custom games entirely - do not use it for sideloading.
       # Debug build: signed with the debug key automatically, installable as-is.
-      - name: Build modern debug APK
-        run: ./gradlew :app:assembleModernDebug
+      - name: Build legacy debug APK
+        run: ./gradlew :app:assembleLegacyDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gamenative-native-touch-modernDebug
-          path: app/build/outputs/apk/modern/debug/*.apk
+          name: gamenative-native-touch-legacyDebug
+          path: app/build/outputs/apk/legacy/debug/*.apk
           if-no-files-found: error
